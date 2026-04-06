@@ -19,10 +19,13 @@ export function registerAssignment(program: Command, assignmentService: Assignme
   assignment
     .command('submit <seq>')
     .description('과제 제출')
-    .requiredOption('-f, --file <path>', '제출할 파일 경로')
-    .option('-i, --image <path>', '이미지 파일 경로')
+    .option('-f, --file <paths...>', '제출할 파일 경로 (여러 개 가능)')
+    .option('-i, --image <paths...>', '이미지 파일 경로 (여러 개 가능)')
     .action(async (seq, opts) => {
-      const result = await assignmentService.submit(seq, { file: opts.file, image: opts.image });
+      const result = await assignmentService.submit(seq, {
+        files: opts.file,
+        images: opts.image,
+      });
       printSubmissionResult(result);
     });
 }

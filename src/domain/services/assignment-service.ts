@@ -95,7 +95,7 @@ export class AssignmentService {
     return result;
   }
 
-  async submit(seq: string, options: { file?: string; image?: string }): Promise<SubmissionResult> {
+  async submit(seq: string, options: { files?: string[]; images?: string[] }): Promise<SubmissionResult> {
     // 1. 과제 상세 페이지 이동
     const detailHtml = await this.client.getHtml(
       `${BASE_URL}/ilos/st/course/report_view_form.acl?RT_SEQ=${seq}`,
@@ -121,12 +121,12 @@ export class AssignmentService {
       }
     }, this.config.id);
 
-    // 4. 파일 업로드 (file 옵션이 있을 때 — Plupload 첨부파일)
+    // 4. 파일 업로드 (files 옵션이 있을 때 — Plupload 첨부파일, 여러 개 지원)
     const uploadedFiles: string[] = [];
-    if (options.file) {
-      const uploadResult = await this.client.uploadFiles(
+    if (options.files && options.files.length > 0) {
+      await this.client.uploadFiles(
         `${BASE_URL}/ilos/co/efile_upload_multiple2.acl`,
-        [options.file],
+        options.files,
         {
           path: 'K006',
           ud: this.config.id,
@@ -134,14 +134,18 @@ export class AssignmentService {
           pf_st_flag: '2',
         },
       );
-      uploadedFiles.push(options.file.split('/').pop() || options.file);
+      for (const f of options.files) {
+        uploadedFiles.push(f.split('/').pop() || f);
+      }
     }
 
-    // 5. 이미지 임베딩 (image 옵션이 있을 때 — TinyMCE 에디터에 <img> 인라인 삽입)
+    // 5. 이미지 임베딩 (images 옵션이 있을 때 — TinyMCE 에디터에 <img> 인라인 삽입, 여러 개 지원)
     // 흐름: 이미지 버튼 클릭 → 찾아보기 클릭 → 파일 업로드 팝업 → 업로드 → URL 반환 → 삽입
-    if (options.image) {
-      await this.embedImageInEditor(options.image);
-      uploadedFiles.push(`[이미지] ${options.image.split('/').pop() || options.image}`);
+    if (options.images && options.images.length > 0) {
+      for (const img of options.images) {
+        await this.embedImageInEditor(img);
+        uploadedFiles.push(`[이미지] ${img.split('/').pop() || img}`);
+      }
     }
 
     // 6. 저장 요청 (form submit)
