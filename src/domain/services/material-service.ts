@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio';
-import { basename, resolve } from 'path';
+import { basename, resolve, join } from 'path';
+import { existsSync, statSync } from 'fs';
 import type { BrowserClient } from '../../transports/browser-client.js';
 import type { CourseService } from './course-service.js';
 import { MaterialSchema } from '../models.js';
@@ -156,9 +157,21 @@ export class MaterialService {
     // 4. 파일 다운로드
     const downloadUrl = `${BASE_URL}/ilos/co/efile_download.acl?FILE_SEQ=${FILE_SEQ}&CONTENT_SEQ=${FILE_GROUP_ID || CONTENT_SEQ}&ky=${ky}&ud=${ud}&pf_st_flag=2`;
 
-    const savePath = outputPath
-      ? resolve(outputPath)
-      : resolve(process.cwd(), fileName || `file_${FILE_SEQ}`);
+    const fallbackName = fileName || `file_${FILE_SEQ}`;
+    let savePath: string;
+    if (outputPath) {
+      // 디렉토리인지 확인
+      if (existsSync(outputPath) && statSync(outputPath).isDirectory()) {
+        savePath = join(outputPath, fallbackName);
+      } else if (outputPath.endsWith('/') || outputPath.endsWith('\\')) {
+        savePath = join(resolve(outputPath), fallbackName);
+      } else {
+        // 파일 경로로 간주
+        savePath = resolve(outputPath);
+      }
+    } else {
+      savePath = resolve(process.cwd(), fallbackName);
+    }
 
     await this.client.downloadFile(downloadUrl, savePath);
 

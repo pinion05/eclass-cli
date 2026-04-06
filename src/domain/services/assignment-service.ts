@@ -6,6 +6,28 @@ import type { Assignment, SubmissionResult } from '../models.js';
 
 const BASE_URL = 'https://eclass.tukorea.ac.kr';
 
+/** "2026.04.08 오후 11:59" 형식의 한국어 날짜 문자열을 Date 객체로 파싱 */
+function parseKoreanDate(dateStr: string): Date {
+  let normalized = dateStr
+    .replace(/\./g, '-')
+    .replace(/오전\s*/, ' ')
+    .replace(/오후\s*/, ' ');
+
+  const match = normalized.match(/(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})/);
+  if (match) {
+    const [, datePart, timePart] = match;
+    const [year, month, day] = datePart.split('-').map(Number);
+    let [hour, minute] = timePart.split(':').map(Number);
+
+    if (dateStr.includes('오후') && hour < 12) hour += 12;
+    if (dateStr.includes('오전') && hour === 12) hour = 0;
+
+    return new Date(year, month - 1, day, hour, minute);
+  }
+
+  return new Date(dateStr.replace(/\./g, '-'));
+}
+
 export class AssignmentService {
   constructor(
     private client: BrowserClient,
@@ -63,8 +85,7 @@ export class AssignmentService {
       let status: '진행중' | '종료' = '진행중';
       if (deadline) {
         try {
-          // "2026.04.08 오후 11:59" → parse
-          const deadlineDate = new Date(deadline.replace(/\./g, '-'));
+          const deadlineDate = parseKoreanDate(deadline);
           if (deadlineDate < now) {
             status = '종료';
           }
@@ -177,8 +198,7 @@ export class AssignmentService {
       form.submit();
     }, { KJ_YEAR, KJ_TERM, KJ_KEY, RT_SEQ, CONTENT_SEQ, ud });
 
-    // 6. 제출 후 재확인 (페이지 로딩 대기)
-    await page.waitForLoadState('domcontentloaded');
+    // 6. 제출 후 결과 페이지에서 성공/실패 판정
     const resultHtml = await page.content();
     const $result = cheerio.load(resultHtml);
 
@@ -191,11 +211,18 @@ export class AssignmentService {
       }
     });
 
+    // 에러/성공 메시지 확인
+    const errorMsg = $result('.alert, .error, .msg_error, [class*="error"]').first().text().trim();
+    const successMsg = $result('.msg_ok, [class*="success"], .alert-success').first().text().trim();
+
+    const success = !errorMsg && !!successMsg;
+    const message = success ? (successMsg || '과제가 성공적으로 제출되었습니다.') : (errorMsg || '과제 제출에 실패했습니다.');
+
     const submittedAt = new Date().toISOString();
 
     return SubmissionResultSchema.parse({
-      success: true,
-      message: '과제가 성공적으로 제출되었습니다.',
+      success,
+      message,
       submittedFiles,
       submittedAt,
     });
@@ -217,39 +244,37 @@ export class AssignmentService {
     // 1. 이미지 삽입 버튼 클릭
     const imageBtn = page.locator('#JR_TXT_image');
     await imageBtn.click();
-    await page.waitForTimeout(1000);
+    await page.waitForSelector('#mce_inlinepopups_', { state: 'visible', timeout: 5000 });
 
     // 2. "찾아보기" 버튼 클릭 → 파일 업로드 팝업 열기
     // image.htm iframe 내부에 있음
     const imageDialogIframe = page.frameLocator('iframe[id^="mce_inlinepopups_"][id$="_ifr"]');
     const browseBtn = imageDialogIframe.locator('#src_browser, input[id^="src"][value*="찾아보기"], a[onclick*="myFileBrowser"]');
     await browseBtn.click();
-    await page.waitForTimeout(1500);
+    await page.waitForSelector('iframe[src*="file_upload_pop_form"]', { state: 'attached', timeout: 5000 });
 
     // 3. 파일 업로드 팝업에서 파일 선택 + 업로드
     // file_upload_pop_form.acl 팝업이 새 인라인 팝업으로 열림
     const uploadPopupIframe = page.frameLocator('iframe[src*="file_upload_pop_form"]');
     const fileInput = uploadPopupIframe.locator('input[type="file"]');
     await fileInput.setInputFiles(imagePath);
-    await page.waitForTimeout(1000);
 
     // 업로드 버튼 클릭
     const uploadBtn = uploadPopupIframe.locator('input[type="submit"], button[type="submit"], #btn_upload, .btn_upload');
     if (await uploadBtn.count() > 0) {
       await uploadBtn.first().click();
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(2000); // 업로드 완료 대기 (iframe 내 네트워크 요청이라 selector 기반 대기 어려움)
     }
 
     // 4. 업로드 완료 후 파일 목록에서 업로드된 파일 클릭 (URL 선택)
     const uploadedFileLink = uploadPopupIframe.locator('a[href*="/ilosfiles/editor-file/"], .file_list a, a[id^="file_"]').first();
     if (await uploadedFileLink.count() > 0) {
       await uploadedFileLink.click();
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1000); // iframe 간 통신 대기
     }
 
     // 5. image.htm 다이얼로그로 돌아와서 "삽입" 버튼 클릭
     const insertBtn = imageDialogIframe.locator('#insert');
     await insertBtn.click();
-    await page.waitForTimeout(1000);
   }
 }
