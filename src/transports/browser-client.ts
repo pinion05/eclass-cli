@@ -57,7 +57,7 @@ export class BrowserClient {
   /** GET 요청 후 page.content() 반환 */
   async getHtml(url: string): Promise<string> {
     if (!this.page) throw new Error('Browser not launched.');
-    await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await this.page.goto(url, { waitUntil: 'networkidle', timeout: 15000 });
     return this.page.content();
   }
 
@@ -141,6 +141,28 @@ export class BrowserClient {
     const buffer = await response.buffer();
     mkdirSync(dirname(resolve(savePath)), { recursive: true });
     writeFileSync(savePath, buffer);
+  }
+
+  /** 강의실 진입: eclassRoom() JS 함수 호출 후 submain 대기 */
+  async enterCourseRoom(kjkey: string): Promise<void> {
+    if (!this.page) throw new Error('Browser not launched.');
+
+    // 수강과목 목록 페이지로 이동 (eclassRoom 함수가 정의되어 있음)
+    await this.page.goto(
+      `${BASE_URL}/ilos/mp/course_register_list_form.acl`,
+      { waitUntil: 'domcontentloaded', timeout: 15000 },
+    );
+
+    // eclassRoom(kjkey) JS 함수 실행
+    await this.page.evaluate((key) => {
+      (window as any).eclassRoom(key);
+    }, kjkey);
+
+    // submain_form.acl 도달 대기
+    await this.page.waitForURL('**/ilos/st/course/submain_form.acl', {
+      timeout: 15000,
+    });
+    await this.page.waitForLoadState('domcontentloaded');
   }
 
   /** Page 인스턴스 반환 */

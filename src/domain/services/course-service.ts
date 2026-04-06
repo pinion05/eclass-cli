@@ -47,10 +47,8 @@ export class CourseService {
 
     const { kjkey } = matched;
 
-    // 2. 강의실 진입 (세션 확보)
-    await this.client.getHtml(
-      `${BASE_URL}/ilos/st/course/submain_form.acl?KJKEY=${kjkey}`,
-    );
+    // 2. 강의실 진입 (eclassRoom JS 호출)
+    await this.client.enterCourseRoom(kjkey);
 
     // 3. 강의계획서 파싱
     const planHtml = await this.client.getHtml(
