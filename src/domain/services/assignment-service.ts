@@ -25,30 +25,31 @@ export class AssignmentService {
     const assignments: Assignment[] = [];
     const now = new Date();
 
-    $('.todo').each((_, el) => {
+    $('.todo_wrap').each((_, el) => {
       const $el = $(el);
 
       const course = $el.find('.todo_subjt').text().trim();
       const title = $el.find('.todo_title').text().trim();
       const dDay = $el.find('.todo_d_day').text().trim();
-      const deadline = $el.find('.todo_date').text().trim();
+      // deadline: second .todo_date span (the actual date, not the D-day container)
+      const deadline = $el.find('.todo_date').last().text().trim().replace(/\s+/g, ' ').trim();
 
-      // hidden inputs에서 gubun과 kj 추출
-      // todo 항목 내부의 hidden input들
-      const gubunInput = $el.find('input[name^="gubun_"]').val() as string | undefined;
-      const kjInput = $el.find('input[name^="kj_"]').val() as string | undefined;
+      // hidden inputs에서 gubun과 kj 추출 (id 속성 사용)
+      const gubunInput = $el.find('input[id^="gubun_"]').val() as string | undefined;
+      const kjInput = $el.find('input[id^="kj_"]').val() as string | undefined;
 
-      // goLecture() onclick에서 seq 추출
-      const onclickAttr = $el.find('[onclick*="goLecture"]').attr('onclick');
-      const seqMatch = onclickAttr?.match(/goLecture\([^)]*seq\s*=\s*['"]?([^'")\s]+)/i);
-      const seq = seqMatch?.[1] ?? '';
+      // goLecture() onclick에서 kjkey, seq, category 추출
+      // goLecture('KJKEY','SEQ','CATEGORY')
+      const onclickAttr = $el.attr('onclick') || $el.find('[onclick*="goLecture"]').attr('onclick');
+      const goMatch = onclickAttr?.match(/goLecture\(['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\)/);
+      const seq = goMatch?.[2] ?? '';
 
       if (!course || !title) return;
 
       // 카테고리 매핑
       let category: 'report' | 'test' | 'lecture_weeks' | 'project';
       const gubun = gubunInput?.toLowerCase() ?? '';
-      if (gubun.includes('report') || gubun.includes('report')) {
+      if (gubun.includes('report')) {
         category = 'report';
       } else if (gubun.includes('test') || gubun.includes('quiz')) {
         category = 'test';
@@ -62,6 +63,7 @@ export class AssignmentService {
       let status: '진행중' | '종료' = '진행중';
       if (deadline) {
         try {
+          // "2026.04.08 오후 11:59" → parse
           const deadlineDate = new Date(deadline.replace(/\./g, '-'));
           if (deadlineDate < now) {
             status = '종료';

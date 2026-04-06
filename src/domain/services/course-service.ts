@@ -15,22 +15,16 @@ export class CourseService {
     const $ = cheerio.load(html);
     const courses: Course[] = [];
 
-    // 각 과목 카드/행 순회
-    $('.content-title').each((_, el) => {
-      const $el = $(el);
-      const container = $el.closest('.content-item, .course-card, tr, .class-item, div[class*="content"]').first();
-      // 교수명, 시간/장소는 같은 부모 내에서 찾기
-      const parent = $el.parent();
+    // 각 과목 카드/행 순회 (content-container 단위)
+    $('.content-container').each((_, el) => {
+      const $container = $(el);
 
-      const name = $el.text().trim();
-      const professor = parent.find('.content-author > li:nth-child(1) > span').text().trim()
-        || $el.closest('*').find('.content-author > li:nth-child(1) > span').first().text().trim();
-      const time = parent.find('.content-author > li:nth-child(2) > span').text().trim()
-        || $el.closest('*').find('.content-author > li:nth-child(2) > span').first().text().trim();
+      const name = $container.find('.content-title').text().trim();
+      const professor = $container.find('.content-author > li:nth-child(1) > span').text().trim();
+      const time = $container.find('.content-author > li:nth-child(2) > span').text().trim();
 
       // kjkey: onclick 속성에서 eclassRoom('KJKEY') 추출
-      const onclickAttr = parent.find('a[onclick*="eclassRoom"]').attr('onclick')
-        || $el.closest('*').find('a[onclick*="eclassRoom"]').first().attr('onclick');
+      const onclickAttr = $container.find('a[onclick*="eclassRoom"]').attr('onclick');
       const kjMatch = onclickAttr?.match(/eclassRoom\(['"]([^'"]+)['"]\)/);
       const kjkey = kjMatch?.[1] ?? '';
 
