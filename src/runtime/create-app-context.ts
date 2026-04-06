@@ -7,8 +7,13 @@ import { MaterialService } from '../domain/services/material-service.js';
 export async function createAppContext() {
   const config = getConfig();
   const browser = new BrowserClient();
-  await browser.launch();
-  await browser.login(config);
+  try {
+    await browser.launch();
+    await browser.login(config);
+  } catch (error) {
+    await browser.close();
+    throw error;
+  }
 
   const courseService = new CourseService(browser);
   const assignmentService = new AssignmentService(browser, config);
