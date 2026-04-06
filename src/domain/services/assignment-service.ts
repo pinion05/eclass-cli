@@ -121,7 +121,7 @@ export class AssignmentService {
       }
     }, this.config.id);
 
-    // 4. 파일 업로드 (file 옵션이 있을 때)
+    // 4. 파일 업로드 (file 옵션이 있을 때 — Plupload 첨부파일)
     const uploadedFiles: string[] = [];
     if (options.file) {
       const uploadResult = await this.client.uploadFiles(
@@ -134,24 +134,17 @@ export class AssignmentService {
           pf_st_flag: '2',
         },
       );
-      // 업로드 결과에서 파일명 추출
       uploadedFiles.push(options.file.split('/').pop() || options.file);
     }
+
+    // 5. 이미지 임베딩 (image 옵션이 있을 때 — TinyMCE 에디터에 <img> 인라인 삽입)
+    // 흐름: 이미지 버튼 클릭 → 찾아보기 클릭 → 파일 업로드 팝업 → 업로드 → URL 반환 → 삽입
     if (options.image) {
-      const uploadResult = await this.client.uploadFiles(
-        `${BASE_URL}/ilos/co/efile_upload_multiple2.acl`,
-        [options.image],
-        {
-          path: 'K006',
-          ud: this.config.id,
-          ky: KJ_KEY,
-          pf_st_flag: '2',
-        },
-      );
-      uploadedFiles.push(options.image.split('/').pop() || options.image);
+      await this.embedImageInEditor(options.image);
+      uploadedFiles.push(`[이미지] ${options.image.split('/').pop() || options.image}`);
     }
 
-    // 5. 저장 요청 (form submit)
+    // 6. 저장 요청 (form submit)
     await page.evaluate((params) => {
       const form = document.createElement('form');
       form.method = 'POST';
@@ -202,5 +195,57 @@ export class AssignmentService {
       submittedFiles,
       submittedAt,
     });
+  }
+
+  /**
+   * TinyMCE 에디터에 이미지를 인라인 임베딩
+   *
+   * 흐름:
+   * 1. 에디터 툴바에서 "이미지 삽입/편집" 버튼 클릭 (id=JR_TXT_image)
+   * 2. 인라인 팝업(image.htm)에서 "찾아보기" 버튼 클릭 → myFileBrowser()
+   * 3. 파일 업로드 팝업(file_upload_pop_form.acl?type=image)에서 파일 업로드
+   * 4. 업로드된 이미지 URL이 src 필드에 채워짐
+   * 5. "삽입" 버튼 클릭 → <img> 태그가 에디터 본문에 삽입
+   */
+  private async embedImageInEditor(imagePath: string): Promise<void> {
+    const page = this.client.getPage();
+
+    // 1. 이미지 삽입 버튼 클릭
+    const imageBtn = page.locator('#JR_TXT_image');
+    await imageBtn.click();
+    await page.waitForTimeout(1000);
+
+    // 2. "찾아보기" 버튼 클릭 → 파일 업로드 팝업 열기
+    // image.htm iframe 내부에 있음
+    const imageDialogIframe = page.frameLocator('iframe[id^="mce_inlinepopups_"][id$="_ifr"]');
+    const browseBtn = imageDialogIframe.locator('#src_browser, input[id^="src"][value*="찾아보기"], a[onclick*="myFileBrowser"]');
+    await browseBtn.click();
+    await page.waitForTimeout(1500);
+
+    // 3. 파일 업로드 팝업에서 파일 선택 + 업로드
+    // file_upload_pop_form.acl 팝업이 새 인라인 팝업으로 열림
+    const uploadPopupIframe = page.frameLocator('iframe[src*="file_upload_pop_form"]');
+    const fileInput = uploadPopupIframe.locator('input[type="file"]');
+    await fileInput.setInputFiles(imagePath);
+    await page.waitForTimeout(1000);
+
+    // 업로드 버튼 클릭
+    const uploadBtn = uploadPopupIframe.locator('input[type="submit"], button[type="submit"], #btn_upload, .btn_upload');
+    if (await uploadBtn.count() > 0) {
+      await uploadBtn.first().click();
+      await page.waitForTimeout(2000);
+    }
+
+    // 4. 업로드 완료 후 파일 목록에서 업로드된 파일 클릭 (URL 선택)
+    const uploadedFileLink = uploadPopupIframe.locator('a[href*="/ilosfiles/editor-file/"], .file_list a, a[id^="file_"]').first();
+    if (await uploadedFileLink.count() > 0) {
+      await uploadedFileLink.click();
+      await page.waitForTimeout(1000);
+    }
+
+    // 5. image.htm 다이얼로그로 돌아와서 "삽입" 버튼 클릭
+    const insertBtn = imageDialogIframe.locator('#insert');
+    await insertBtn.click();
+    await page.waitForTimeout(1000);
   }
 }
