@@ -6,7 +6,7 @@ import { MaterialService } from '../domain/services/material-service.js';
 
 export async function createAppContext() {
   const config = getConfig();
-  const browser = new BrowserClient();
+  const browser = new BrowserClient(config.university);
   try {
     await browser.launch();
     await browser.login(config);

@@ -3,7 +3,6 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, resolve, basename } from 'path';
 import type { EclassConfig } from '../config/config.js';
 
-const BASE_URL = 'https://eclass.tukorea.ac.kr';
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
 
@@ -11,6 +10,13 @@ export class BrowserClient {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  private baseUrl: string;
+  private isTukorea: boolean;
+
+  constructor(university: string = 'tukorea.ac.kr') {
+    this.baseUrl = `https://eclass.${university}`;
+    this.isTukorea = university === 'tukorea.ac.kr';
+  }
 
   /** headless Chromium 실행, BrowserContext + Page 생성 */
   async launch(): Promise<void> {
@@ -22,36 +28,56 @@ export class BrowserClient {
     this.page = await this.context.newPage();
   }
 
-  /** 포털 SSO → e-Class SSO 흐름 */
+  /** 포털 SSO → e-Class SSO 흐름 (tukorea) 또는 e-Class 자체 로그인 폼 폴백 */
   async login(config: EclassConfig): Promise<void> {
     if (!this.page) throw new Error('Browser not launched. Call launch() first.');
 
     const page = this.page;
 
-    // 1. 포털 SSO 로그인 페이지 이동
-    await page.goto('https://ksc.tukorea.ac.kr/sso/login_stand.jsp', {
-      waitUntil: 'domcontentloaded',
-      timeout: 15000,
-    });
+    if (this.isTukorea) {
+      // 기존 포털 SSO 흐름
+      // 1. 포털 SSO 로그인 페이지 이동
+      await page.goto('https://ksc.tukorea.ac.kr/sso/login_stand.jsp', {
+        waitUntil: 'domcontentloaded',
+        timeout: 15000,
+      });
 
-    // 2. ID/PW 입력
-    await page.fill('#internalId', config.id);
-    await page.fill('#internalPw', config.pw);
+      // 2. ID/PW 입력
+      await page.fill('#internalId', config.id);
+      await page.fill('#internalPw', config.pw);
 
-    // 3. 로그인 버튼 클릭
-    await page.click('#internalLogin');
+      // 3. 로그인 버튼 클릭
+      await page.click('#internalLogin');
 
-    // 4. 포털 메인 도달 대기
-    await page.waitForURL('**/portal/default/stu**', { timeout: 15000 });
+      // 4. 포털 메인 도달 대기
+      await page.waitForURL('**/portal/default/stu**', { timeout: 15000 });
 
-    // 5. e-Class SSO 이동
-    await page.goto('http://eclass.tukorea.ac.kr/ilos/sso/index.jsp', {
-      waitUntil: 'domcontentloaded',
-      timeout: 15000,
-    });
+      // 5. e-Class SSO 이동
+      await page.goto(`${this.baseUrl}/ilos/sso/index.jsp`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 15000,
+      });
 
-    // 6. e-Class 메인 도달 대기
-    await page.waitForURL('**/ilos/main/main_form.acl', { timeout: 15000 });
+      // 6. e-Class 메인 도달 대기
+      await page.waitForURL('**/ilos/main/main_form.acl', { timeout: 15000 });
+    } else {
+      // e-Class 자체 로그인 폼 시도 (reCAPTCHA가 있을 수 있으나 시도)
+      console.warn(
+        `[eclass-cli] SSO login is only supported for tukorea.ac.kr. ` +
+        `Attempting e-Class direct login for ${this.baseUrl}. ` +
+        `This may fail if reCAPTCHA is enabled.`,
+      );
+
+      await page.goto(`${this.baseUrl}/ilos/main/member/login_form.acl`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 15000,
+      });
+
+      await page.fill('#usr_id', config.id);
+      await page.fill('#usr_pwd', config.pw);
+      await page.locator('#login_btn, input[type="submit"]').first().click();
+      await page.waitForURL('**/main/main_form.acl', { timeout: 15000 });
+    }
   }
 
   /** GET 요청 후 page.content() 반환 */
@@ -90,10 +116,10 @@ export class BrowserClient {
   ): Promise<string> {
     if (!this.page) throw new Error('Browser not launched.');
 
-    // Node-side: 파일을 읽어서 Uint8Array + 이름 준비
+    // Node-side: 파일을 읽어서 base64로 준비 (메모리 효율)
     const filesData = filePaths.map((p) => ({
       name: basename(p),
-      content: Array.from(readFileSync(p)) as number[],
+      content: readFileSync(p).toString('base64'),
     }));
 
     const responseText = await this.page.evaluate(
@@ -103,7 +129,12 @@ export class BrowserClient {
           formData.append(key, value);
         }
         for (const file of files) {
-          const blob = new Blob([new Uint8Array(file.content)], { type: 'application/octet-stream' });
+          const binary = atob(file.content);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: 'application/octet-stream' });
           formData.append('file', blob, file.name);
         }
         const resp = await fetch(targetUrl, {
@@ -149,7 +180,7 @@ export class BrowserClient {
 
     // 수강과목 목록 페이지로 이동 (eclassRoom 함수가 정의되어 있음)
     await this.page.goto(
-      `${BASE_URL}/ilos/mp/course_register_list_form.acl`,
+      `${this.baseUrl}/ilos/mp/course_register_list_form.acl`,
       { waitUntil: 'domcontentloaded', timeout: 15000 },
     );
 
