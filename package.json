@@ -5,8 +5,13 @@
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.32.1",
-  "bin": { "eclass": "dist/src/cli.js" },
-  "files": ["dist/src/", "README.md"],
+  "bin": {
+    "eclass": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src/",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
@@ -14,14 +19,16 @@
     "dev": "tsc && node dist/src/cli.js"
   },
   "dependencies": {
-    "commander": "^13.0.0",
-    "playwright": "^1.51.0",
     "cheerio": "^1.0.0",
+    "commander": "^13.0.0",
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.51.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-fetch": "^2.6.13",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^3.0.0"
   }
 }
