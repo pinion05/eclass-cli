@@ -14,6 +14,7 @@ export function printCourses(courses: Course[]): void {
 
 export function printAssignments(assignments: Assignment[]): void {
   console.table(assignments.map(a => ({
+    seq: a.seq,
     과목: a.course,
     카테고리: a.category,
     제목: a.title,
@@ -86,11 +87,14 @@ export function printAssignmentDetail(detail: AssignmentDetail): void {
     detail.attachments.forEach(a => console.log(`  - ${a.name} (${a.url})`));
   }
 
-  // 본문 내용 (태그 제거한 텍스트)
+  // 본문 내용 (태그 제거한 텍스트, 줄바꿈 보존)
   const contentText = detail.content
-    .replace(/<[^>]+>/g, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
   console.log(`\n내용:\n${contentText}`);
 }

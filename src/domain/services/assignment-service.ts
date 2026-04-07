@@ -133,7 +133,12 @@ export class AssignmentService {
       throw new Error(`과제를 찾을 수 없습니다: seq=${seq}`);
     }
 
-    // 2. 강의실 진입
+    // 2. 강의실 진입 (kjkey 유효성 검증)
+    if (!target.kjkey.trim()) {
+      throw new Error(
+        `kjkey가 비어 있습니다 (seq=${seq}). enterCourseRoom 호출 전 강의실 키가 필요합니다.`,
+      );
+    }
     await this.client.enterCourseRoom(target.kjkey);
 
     // 3. 과제 상세 페이지 로드
@@ -142,8 +147,15 @@ export class AssignmentService {
     );
     const $ = cheerio.load(html);
 
-    // 4. table.bbsview 파싱
+    // 4. table.bbsview 파싱 (존재 검증)
     const $table = $('table.bbsview');
+    if ($table.length === 0) {
+      throw new Error(
+        `과제 상세 페이지에 table.bbsview가 없습니다 (seq=${seq}). ` +
+        `접근 권한이 없거나 페이지 로드에 실패했을 수 있습니다. ` +
+        `enterCourseRoom이 먼저 호출되었는지 확인하세요.`,
+      );
+    }
     const rows = $table.find('tbody > tr');
 
     // 헬퍼: th 텍스트로 행 찾기
@@ -380,14 +392,16 @@ export class AssignmentService {
     const uploadBtn = uploadPopupIframe.locator('input[type="submit"], button[type="submit"], #btn_upload, .btn_upload');
     if (await uploadBtn.count() > 0) {
       await uploadBtn.first().click();
-      await page.waitForTimeout(2000); // 업로드 완료 대기 (iframe 내 네트워크 요청이라 selector 기반 대기 어려움)
+      // 업로드 완료 대기: 파일 목록 요소가 나타날 때까지 대기
+      await uploadPopupIframe.locator('a[href*="/ilosfiles/editor-file/"], .file_list a, a[id^="file_"]').first().waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
     }
 
     // 4. 업로드 완료 후 파일 목록에서 업로드된 파일 클릭 (URL 선택)
     const uploadedFileLink = uploadPopupIframe.locator('a[href*="/ilosfiles/editor-file/"], .file_list a, a[id^="file_"]').first();
     if (await uploadedFileLink.count() > 0) {
       await uploadedFileLink.click();
-      await page.waitForTimeout(1000); // iframe 간 통신 대기
+      // iframe 간 통신 대기: src 필드가 채워질 때까지
+      await imageDialogIframe.locator('#src').waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
     }
 
     // 5. image.htm 다이얼로그로 돌아와서 "삽입" 버튼 클릭
