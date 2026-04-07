@@ -54,3 +54,27 @@ export const SubmissionResultSchema = z.object({
   submittedAt: z.string(),
 });
 export type SubmissionResult = z.infer<typeof SubmissionResultSchema>;
+
+export const AssignmentDetailSchema = z.object({
+  title: z.string(),
+  submissionType: z.string(),
+  publishDate: z.string(),
+  deadline: z.string(),
+  points: z.string(),
+  lateSubmission: z.string(),
+  scoreVisibility: z.string(),
+  scoreOpenStart: z.string().nullable(),
+  scoreOpenEnd: z.string().nullable(),
+  content: z.string(),
+  contentImages: z.array(z.object({
+    src: z.string(),
+    alt: z.string(),
+  })),
+  attachments: z.array(z.object({
+    name: z.string(),
+    url: z.string(),
+  })),
+  seq: z.string(),
+  kjkey: z.string(),
+});
+export type AssignmentDetail = z.infer<typeof AssignmentDetailSchema>;

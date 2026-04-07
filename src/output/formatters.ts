@@ -1,4 +1,4 @@
-import type { Course, Assignment, Material, CourseDetail, SubmissionResult } from '../domain/models.js';
+import type { Course, Assignment, Material, CourseDetail, SubmissionResult, AssignmentDetail } from '../domain/models.js';
 
 export function outputJson<T>(data: T): void {
   console.log(JSON.stringify(data, null, 2));
@@ -59,4 +59,38 @@ export function printSubmissionResult(result: SubmissionResult): void {
   } else {
     console.error(`❌ ${result.message}`);
   }
+}
+
+export function printAssignmentDetail(detail: AssignmentDetail): void {
+  console.log(`# ${detail.title}`);
+  console.log(`제출방식: ${detail.submissionType}`);
+  console.log(`게시일: ${detail.publishDate}`);
+  console.log(`마감일: ${detail.deadline}`);
+  console.log(`배점: ${detail.points}`);
+  console.log(`지각제출: ${detail.lateSubmission}`);
+  console.log(`점수공개: ${detail.scoreVisibility}`);
+  if (detail.scoreOpenStart) {
+    console.log(`  공개시작: ${detail.scoreOpenStart}`);
+    console.log(`  공개마감: ${detail.scoreOpenEnd ?? '무제한'}`);
+  }
+
+  if (detail.contentImages.length > 0) {
+    console.log(`\n본문 이미지:`);
+    detail.contentImages.forEach((img, i) => {
+      console.log(`  [${i + 1}] ${img.alt ? `${img.alt} — ` : ''}${img.src}`);
+    });
+  }
+
+  if (detail.attachments.length > 0) {
+    console.log(`\n첨부파일:`);
+    detail.attachments.forEach(a => console.log(`  - ${a.name} (${a.url})`));
+  }
+
+  // 본문 내용 (태그 제거한 텍스트)
+  const contentText = detail.content
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  console.log(`\n내용:\n${contentText}`);
 }

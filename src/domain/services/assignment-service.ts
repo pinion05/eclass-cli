@@ -1,8 +1,8 @@
 import * as cheerio from 'cheerio';
 import type { BrowserClient } from '../../transports/browser-client.js';
 import type { EclassConfig } from '../../config/config.js';
-import { AssignmentSchema, SubmissionResultSchema } from '../models.js';
-import type { Assignment, SubmissionResult } from '../models.js';
+import { AssignmentSchema, SubmissionResultSchema, AssignmentDetailSchema } from '../models.js';
+import type { Assignment, SubmissionResult, AssignmentDetail } from '../models.js';
 
 const BASE_URL = 'https://eclass.tukorea.ac.kr';
 
@@ -114,6 +114,123 @@ export class AssignmentService {
     }
 
     return result;
+  }
+
+  /**
+   * 과제 상세 정보 조회
+   * 
+   * 흐름:
+   * 1. 과제 목록에서 seq에 해당하는 kjkey 찾기
+   * 2. 강의실 진입 (enterCourseRoom)
+   * 3. report_view_form.acl 접근
+   * 4. table.bbsview 파싱
+   */
+  async getAssignmentDetail(seq: string): Promise<AssignmentDetail> {
+    // 1. 과제 목록에서 kjkey 찾기
+    const assignments = await this.listAssignments();
+    const target = assignments.find(a => a.seq === seq);
+    if (!target) {
+      throw new Error(`과제를 찾을 수 없습니다: seq=${seq}`);
+    }
+
+    // 2. 강의실 진입
+    await this.client.enterCourseRoom(target.kjkey);
+
+    // 3. 과제 상세 페이지 로드
+    const html = await this.client.getHtml(
+      `${BASE_URL}/ilos/st/course/report_view_form.acl?RT_SEQ=${seq}`,
+    );
+    const $ = cheerio.load(html);
+
+    // 4. table.bbsview 파싱
+    const $table = $('table.bbsview');
+    const rows = $table.find('tbody > tr');
+
+    // 헬퍼: th 텍스트로 행 찾기
+    const findRow = (thText: string) => {
+      return rows.filter((_, el) => {
+        const th = $(el).find('th').text().trim();
+        return th === thText;
+      });
+    };
+
+    // 제목
+    const titleRow = findRow('제목');
+    const titleText = titleRow.find('td.first').clone().children().remove().end().text().trim();
+
+    // 제출방식
+    const submissionType = findRow('제출방식').find('td').text().trim();
+
+    // 게시일
+    const publishDate = findRow('게시일').find('td').text().trim();
+
+    // 마감일
+    const deadline = findRow('마감일').find('td').text().trim();
+
+    // 배점
+    const points = findRow('배점').find('td').text().trim();
+
+    // 지각제출
+    const lateSubmission = findRow('지각제출').find('td').text().trim();
+
+    // 점수공개
+    const $scoreRow = findRow('점수공개').find('td');
+    const scoreVisibility = $scoreRow.find('div').first().text().trim();
+    let scoreOpenStart: string | null = null;
+    let scoreOpenEnd: string | null = null;
+    if (scoreVisibility === '공개') {
+      const startMatch = $scoreRow.text().match(/시작일\s*:\s*([\d.]+\s*(?:오전|오후)\s*\d+:\d+)/);
+      scoreOpenStart = startMatch?.[1] ?? null;
+      const endMatch = $scoreRow.text().match(/마감일\s*:\s*(무제한|[\d.]+\s*(?:오전|오후)\s*\d+:\d+)/);
+      scoreOpenEnd = endMatch?.[1] ?? null;
+    }
+
+    // 본문 내용 (textviewer td)
+    const $contentTd = $table.find('td.textviewer');
+    const $contentDiv = $contentTd.children('div').first();
+    const contentHtml = $contentDiv.html() ?? '';
+    // 본문 텍스트 (HTML 태그 제거)
+    const contentText = $contentDiv.text().trim();
+
+    // 본문 내 이미지 추출
+    const contentImages: { src: string; alt: string }[] = [];
+    $contentDiv.find('img').each((_, el) => {
+      const src = $(el).attr('src') ?? '';
+      const alt = $(el).attr('alt') ?? '';
+      if (src) {
+        contentImages.push({ src: src.startsWith('http') ? src : `${BASE_URL}${src}`, alt });
+      }
+    });
+
+    // 첨부파일 (div#tbody_file 내 링크)
+    const attachments: { name: string; url: string }[] = [];
+    $contentTd.find('#tbody_file a').each((_, el) => {
+      const href = $(el).attr('href') ?? '';
+      const name = $(el).text().trim();
+      if (name && href) {
+        attachments.push({ name, url: href.startsWith('http') ? href : `${BASE_URL}${href}` });
+      }
+    });
+
+    // hidden inputs
+    const kjkey = $('input#KJ_KEY').val() as string || target.kjkey;
+
+    return AssignmentDetailSchema.parse({
+      title: titleText,
+      submissionType,
+      publishDate,
+      deadline,
+      points,
+      lateSubmission,
+      scoreVisibility,
+      scoreOpenStart,
+      scoreOpenEnd,
+      content: contentHtml || contentText,
+      contentImages,
+      attachments,
+      seq,
+      kjkey,
+    });
   }
 
   async submit(seq: string, options: { files?: string[]; images?: string[] }): Promise<SubmissionResult> {

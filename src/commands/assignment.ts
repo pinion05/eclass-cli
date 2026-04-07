@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import type { AssignmentService } from '../domain/services/assignment-service.js';
-import { printAssignments, printSubmissionResult, outputJson } from '../output/formatters.js';
+import { printAssignments, printSubmissionResult, printAssignmentDetail, outputJson } from '../output/formatters.js';
 
 export function registerAssignment(program: Command, assignmentService: AssignmentService) {
   const assignment = program.command('assignment').description('과제 관리');
@@ -14,6 +14,16 @@ export function registerAssignment(program: Command, assignmentService: Assignme
       const items = await assignmentService.listAssignments(opts.course);
       if (opts.json) outputJson(items);
       else printAssignments(items);
+    });
+
+  assignment
+    .command('show <seq>')
+    .description('과제 상세 조회')
+    .option('--json', 'JSON 출력')
+    .action(async (seq, opts) => {
+      const detail = await assignmentService.getAssignmentDetail(seq);
+      if (opts.json) outputJson(detail);
+      else printAssignmentDetail(detail);
     });
 
   assignment
