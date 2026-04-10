@@ -3,6 +3,7 @@ import type { BrowserClient } from '../../transports/browser-client.js';
 import type { EclassConfig } from '../../config/config.js';
 import { AssignmentSchema, SubmissionResultSchema, AssignmentDetailSchema } from '../models.js';
 import type { Assignment, SubmissionResult, AssignmentDetail } from '../models.js';
+import { CourseService } from './course-service.js';
 
 const BASE_URL = 'https://eclass.tukorea.ac.kr';
 
@@ -26,6 +27,106 @@ function parseKoreanDate(dateStr: string): Date {
   }
 
   return new Date(dateStr.replace(/\./g, '-'));
+}
+
+export function combineSeqCsv(...values: Array<string | null | undefined>): string {
+  const merged = values
+    .flatMap((value) => (value || '').split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(merged)).join(',');
+}
+
+export function normalizeEditorImageSrc(src: string): string {
+  const trimmed = src.trim();
+  if (!trimmed) return '';
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      return new URL(trimmed).pathname;
+    } catch {
+      const match = trimmed.match(/^https?:\/\/[^/]+(\/.*)$/i);
+      return match?.[1] ?? trimmed;
+    }
+  }
+
+  return trimmed;
+}
+
+export function extractEditorImageId(src: string): string {
+  const normalized = normalizeEditorImageSrc(src);
+  const basename = normalized.split('/').pop() ?? '';
+  return basename.replace(/\.[^.]+$/, '');
+}
+
+export function extractContentSeqFromUpdateScript(scriptSource: string): string | null {
+  const match = scriptSource.match(/CONTENT_SEQ\s*:\s*["']([^"']+)["']/);
+  return match?.[1] ?? null;
+}
+
+export function parseReportAssignmentsFromListHtml(
+  html: string,
+  fallbackCourse: string,
+  fallbackKjkey: string,
+): Assignment[] {
+  const $ = cheerio.load(html);
+  const assignments: Assignment[] = [];
+
+  $('tr.list').each((_, el) => {
+    const $row = $(el);
+    const title = $row.find('.subjt_top').first().text().trim();
+    const onclick = $row.find('[onclick*="report_view_form.acl"]').first().attr('onclick')
+      || $row.attr('onclick')
+      || '';
+    const seq = onclick.match(/RT_SEQ=(\d+)/)?.[1] ?? '';
+    const cells = $row.find('td');
+    const statusText = cells.eq(3).text().trim();
+    const deadline = cells.last().text().trim().replace(/\s+/g, ' ');
+
+    if (!title || !seq) {
+      return;
+    }
+
+    assignments.push({
+      title,
+      course: fallbackCourse,
+      category: 'report',
+      dDay: '',
+      deadline,
+      status: statusText.includes('종료') ? '종료' : '진행중',
+      kjkey: fallbackKjkey,
+      seq,
+    });
+  });
+
+  return AssignmentSchema.array().parse(assignments);
+}
+
+export function mergeAssignmentsBySeq(primary: Assignment[], fallback: Assignment[]): Assignment[] {
+  const merged = new Map<string, Assignment>();
+
+  for (const item of fallback) {
+    merged.set(item.seq, item);
+  }
+
+  for (const item of primary) {
+    const existing = merged.get(item.seq);
+    if (!existing) {
+      merged.set(item.seq, item);
+      continue;
+    }
+
+    merged.set(item.seq, {
+      ...existing,
+      ...item,
+      dDay: item.dDay || existing.dDay,
+      deadline: item.deadline || existing.deadline,
+      kjkey: item.kjkey || existing.kjkey,
+    });
+  }
+
+  return Array.from(merged.values());
 }
 
 export class AssignmentService {
@@ -53,22 +154,17 @@ export class AssignmentService {
       const course = $el.find('.todo_subjt').text().trim();
       const title = $el.find('.todo_title').text().trim();
       const dDay = $el.find('.todo_d_day').text().trim();
-      // deadline: second .todo_date span (the actual date, not the D-day container)
       const deadline = $el.find('.todo_date').last().text().trim().replace(/\s+/g, ' ').trim();
 
-      // hidden inputs에서 gubun과 kj 추출 (id 속성 사용)
       const gubunInput = $el.find('input[id^="gubun_"]').val() as string | undefined;
       const kjInput = $el.find('input[id^="kj_"]').val() as string | undefined;
 
-      // goLecture() onclick에서 kjkey, seq, category 추출
-      // goLecture('KJKEY','SEQ','CATEGORY')
       const onclickAttr = $el.attr('onclick') || $el.find('[onclick*="goLecture"]').attr('onclick');
       const goMatch = onclickAttr?.match(/goLecture\(['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\)/);
       const seq = goMatch?.[2] ?? '';
 
       if (!course || !title) return;
 
-      // 카테고리 매핑
       let category: 'report' | 'test' | 'lecture_weeks' | 'project';
       const gubun = gubunInput?.toLowerCase() ?? '';
       if (gubun.includes('report')) {
@@ -81,7 +177,6 @@ export class AssignmentService {
         category = 'lecture_weeks';
       }
 
-      // 마감일 파싱 → 상태 결정
       let status: '진행중' | '종료' = '진행중';
       if (deadline) {
         try {
@@ -107,6 +202,8 @@ export class AssignmentService {
     });
 
     let result = AssignmentSchema.array().parse(assignments);
+    const reportAssignments = await this.listReportAssignments(courseFilter);
+    result = mergeAssignmentsBySeq(result, reportAssignments);
 
     if (courseFilter) {
       const lowerFilter = courseFilter.toLowerCase();
@@ -114,6 +211,38 @@ export class AssignmentService {
     }
 
     return result;
+  }
+
+  private async listReportAssignments(courseFilter?: string): Promise<Assignment[]> {
+    const courseService = new CourseService(this.client);
+    const courses = await courseService.listCourses();
+    const lowerFilter = courseFilter?.toLowerCase();
+    const targetCourses = lowerFilter
+      ? courses.filter((course) => course.name.toLowerCase().includes(lowerFilter))
+      : courses;
+    const reportAssignments: Assignment[] = [];
+
+    for (const course of targetCourses) {
+      await this.client.enterCourseRoom(course.kjkey);
+      const reportHtml = await this.client.getHtml(
+        `${BASE_URL}/ilos/st/course/report_list_form.acl?acl=report_list_form.acl&s=menu`,
+      );
+      reportAssignments.push(...parseReportAssignmentsFromListHtml(reportHtml, course.name, course.kjkey));
+    }
+
+    return mergeAssignmentsBySeq([], reportAssignments);
+  }
+
+  private async resolveAssignment(seq: string): Promise<Assignment> {
+    const assignments = await this.listAssignments();
+    const target = assignments.find((assignment) => assignment.seq === seq);
+    if (!target) {
+      throw new Error(`과제를 찾을 수 없습니다: seq=${seq}`);
+    }
+    if (!target.kjkey.trim()) {
+      throw new Error(`kjkey가 비어 있습니다 (seq=${seq}). submit 전 강의실 진입 컨텍스트가 필요합니다.`);
+    }
+    return target;
   }
 
   /**
@@ -126,19 +255,9 @@ export class AssignmentService {
    * 4. table.bbsview 파싱
    */
   async getAssignmentDetail(seq: string): Promise<AssignmentDetail> {
-    // 1. 과제 목록에서 kjkey 찾기
-    const assignments = await this.listAssignments();
-    const target = assignments.find(a => a.seq === seq);
-    if (!target) {
-      throw new Error(`과제를 찾을 수 없습니다: seq=${seq}`);
-    }
+    const target = await this.resolveAssignment(seq);
 
     // 2. 강의실 진입 (kjkey 유효성 검증)
-    if (!target.kjkey.trim()) {
-      throw new Error(
-        `kjkey가 비어 있습니다 (seq=${seq}). enterCourseRoom 호출 전 강의실 키가 필요합니다.`,
-      );
-    }
     await this.client.enterCourseRoom(target.kjkey);
 
     // 3. 과제 상세 페이지 로드
@@ -246,51 +365,91 @@ export class AssignmentService {
   }
 
   async submit(seq: string, options: { files?: string[]; images?: string[] }): Promise<SubmissionResult> {
-    // 1. 과제 상세 페이지 이동
-    const detailHtml = await this.client.getHtml(
+    const target = await this.resolveAssignment(seq);
+
+    await this.client.enterCourseRoom(target.kjkey);
+    await this.client.getHtml(
       `${BASE_URL}/ilos/st/course/report_view_form.acl?RT_SEQ=${seq}`,
     );
-    const $ = cheerio.load(detailHtml);
 
-    // 2. hidden inputs 추출
-    const KJ_YEAR = $('input[name="KJ_YEAR"]').val() as string || '';
-    const KJ_TERM = $('input[name="KJ_TERM"]').val() as string || '';
-    const KJ_KEY = $('input[name="KJ_KEY"]').val() as string || '';
+    const page = this.client.getPage();
+    await this.dismissDraftDialogs();
+
+    let mode: 'insert' | 'update' = 'insert';
+    const updateButton = page.locator('#uptBtn');
+    if (await updateButton.count() > 0) {
+      mode = 'update';
+      await updateButton.first().click({ force: true });
+      await page.waitForSelector('#saveBtn', { state: 'visible', timeout: 15000 });
+      await this.dismissDraftDialogs();
+    }
+
+    const formHtml = await page.content();
+    const $ = cheerio.load(formHtml);
+    const KJ_KEY = $('input[name="KJ_KEY"]').val() as string || target.kjkey;
     const RT_SEQ = $('input[name="RT_SEQ"]').val() as string || seq;
-    const CONTENT_SEQ = $('input[name="CONTENT_SEQ"]').val() as string || '';
+    let CONTENT_SEQ = $('input[name="CONTENT_SEQ"]').val() as string || '';
     const ud = $('input[name="ud"]').val() as string || this.config.id;
 
-    // 3. 본문 입력 (null 방지)
-    const page = this.client.getPage();
+    if (mode === 'update' && !CONTENT_SEQ) {
+      const updateScriptSource = await page.evaluate(() => {
+        const win = window as any;
+        return typeof win.updateGo?.toString === 'function' ? win.updateGo.toString() : '';
+      });
+      CONTENT_SEQ = extractContentSeqFromUpdateScript(updateScriptSource) ?? '';
+    }
+
+    await page.waitForSelector('#submit_div', { state: 'visible', timeout: 10000 });
+    if (options.images && options.images.length > 0) {
+      await page.waitForSelector('#JR_TXT_image', { state: 'visible', timeout: 10000 });
+    }
+
     await page.evaluate((content) => {
       const textarea = document.querySelector('textarea[name="CONTENT"]')
+        || document.querySelector('#JR_TXT')
         || document.querySelector('textarea')
         || document.querySelector('#CONTENT');
       if (textarea) {
         (textarea as HTMLTextAreaElement).value = content;
       }
+      const win = window as any;
+      if (win.tinymce?.get?.('JR_TXT')) {
+        win.tinymce.get('JR_TXT').setContent(content);
+        win.tinymce.triggerSave?.();
+      }
     }, this.config.id);
 
-    // 4. 파일 업로드 (files 옵션이 있을 때 — Plupload 첨부파일, 여러 개 지원)
     const uploadedFiles: string[] = [];
+    const uploadedFileSeqs: string[] = [];
     if (options.files && options.files.length > 0) {
-      await this.client.uploadFiles(
-        `${BASE_URL}/ilos/co/efile_upload_multiple2.acl`,
-        options.files,
-        {
-          path: 'K006',
-          ud: this.config.id,
-          ky: KJ_KEY,
-          pf_st_flag: '2',
-        },
-      );
-      for (const f of options.files) {
-        uploadedFiles.push(f.split('/').pop() || f);
+      for (const filePath of options.files) {
+        const uploadResponse = await this.client.uploadFiles(
+          `${BASE_URL}/ilos/co/efile_upload_multiple2.acl`,
+          [filePath],
+          {
+            path: 'K006',
+            ud: this.config.id,
+            ky: KJ_KEY,
+            pf_st_flag: '2',
+          },
+        );
+
+        const uploadResult = JSON.parse(uploadResponse) as {
+          isError?: boolean;
+          seq1?: string;
+          message?: string;
+        };
+
+        if (uploadResult.isError) {
+          throw new Error(uploadResult.message || `파일 업로드에 실패했습니다: ${filePath}`);
+        }
+        if (uploadResult.seq1) {
+          uploadedFileSeqs.push(uploadResult.seq1);
+        }
+        uploadedFiles.push(filePath.split('/').pop() || filePath);
       }
     }
 
-    // 5. 이미지 임베딩 (images 옵션이 있을 때 — TinyMCE 에디터에 <img> 인라인 삽입, 여러 개 지원)
-    // 흐름: 이미지 버튼 클릭 → 찾아보기 클릭 → 파일 업로드 팝업 → 업로드 → URL 반환 → 삽입
     if (options.images && options.images.length > 0) {
       for (const img of options.images) {
         await this.embedImageInEditor(img);
@@ -298,62 +457,102 @@ export class AssignmentService {
       }
     }
 
-    // 6. 저장 요청 (form submit)
-    await page.evaluate((params) => {
-      const form = document.createElement('form');
-      form.method = 'POST';
-      form.action = '/ilos/st/course/report_submit_form.acl';
+    const submitPayload = await page.evaluate(() => {
+      const win = window as any;
+      win.tinymce?.triggerSave?.();
+      const editor = win.tinymce?.get?.('JR_TXT');
+      const jrTxt = editor?.getContent?.({ format: 'html' })
+        ?? (document.querySelector('#JR_TXT') as HTMLTextAreaElement | null)?.value
+        ?? '';
 
-      for (const [key, value] of Object.entries(params)) {
-        const input = document.createElement('input');
-        input.type = 'hidden';
-        input.name = key;
-        input.value = value;
-        form.appendChild(input);
+      let editorSeqs = '';
+      if (editor?.getBody) {
+        const body = editor.getBody();
+        const ufiles = Array.from(body.getElementsByClassName('imaxsoftUfiles'));
+        editorSeqs = ufiles
+          .map((el) => (el instanceof HTMLElement ? el.id : ''))
+          .filter(Boolean)
+          .join(',');
       }
 
-      // CONTENT textarea 값 추가
-      const textarea = document.querySelector('textarea[name="CONTENT"]')
-        || document.querySelector('textarea');
-      if (textarea) {
-        const contentInput = document.createElement('input');
-        contentInput.type = 'hidden';
-        contentInput.name = 'CONTENT';
-        contentInput.value = (textarea as HTMLTextAreaElement).value;
-        form.appendChild(contentInput);
-      }
-
-      document.body.appendChild(form);
-      form.submit();
-    }, { KJ_YEAR, KJ_TERM, KJ_KEY, RT_SEQ, CONTENT_SEQ, ud });
-
-    // 6. 제출 후 결과 페이지에서 성공/실패 판정
-    const resultHtml = await page.content();
-    const $result = cheerio.load(resultHtml);
-
-    // 제출된 파일 목록 파싱
-    const submittedFiles: string[] = [...uploadedFiles];
-    $result('.file-list a, .uploaded-file a, [class*="file"] a').each((_, el) => {
-      const fileName = $result(el).text().trim();
-      if (fileName && !submittedFiles.includes(fileName)) {
-        submittedFiles.push(fileName);
-      }
+      return {
+        jrTxt,
+        editorSeqs,
+        existingFileSeqs: typeof win.getFileSeqs === 'function' ? win.getFileSeqs() : '',
+        delFileSeqs: typeof win.getDelFileSeqs === 'function' ? win.getDelFileSeqs() : '',
+      };
     });
 
-    // 에러/성공 메시지 확인
-    const errorMsg = $result('.alert, .error, .msg_error, [class*="error"]').first().text().trim();
-    const successMsg = $result('.msg_ok, [class*="success"], .alert-success').first().text().trim();
+    const submissionResult = await page.evaluate(
+      async (params) => {
+        const body = new URLSearchParams({
+          ud: params.ud,
+          ky: params.ky,
+          returnData: 'json',
+          JR_TXT: params.jrTxt,
+          RT_SEQ: params.rtSeq,
+          FILE_SEQS: params.fileSeqs,
+          EDITOR_SEQS: params.editorSeqs,
+          encoding: 'utf-8',
+        });
 
-    const success = !errorMsg && !!successMsg;
-    const message = success ? (successMsg || '과제가 성공적으로 제출되었습니다.') : (errorMsg || '과제 제출에 실패했습니다.');
+        if (params.mode === 'insert') {
+          body.set('start', '');
+          body.set('display', '');
+        } else {
+          body.set('CONTENT_SEQ', params.contentSeq);
+          body.set('D_FILE_SEQS', params.delFileSeqs);
+        }
 
-    const submittedAt = new Date().toISOString();
+        const resp = await fetch(
+          params.mode === 'insert' ? '/ilos/st/course/report_insert.acl' : '/ilos/st/course/report_update.acl',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body.toString(),
+            redirect: 'follow',
+          },
+        );
+        return await resp.json();
+      },
+      {
+        mode,
+        ud,
+        ky: KJ_KEY,
+        rtSeq: RT_SEQ,
+        contentSeq: CONTENT_SEQ,
+        jrTxt: submitPayload.jrTxt,
+        fileSeqs: combineSeqCsv(submitPayload.existingFileSeqs, uploadedFileSeqs.join(',')),
+        editorSeqs: submitPayload.editorSeqs,
+        delFileSeqs: submitPayload.delFileSeqs,
+      },
+    ) as {
+      isError?: boolean;
+      isKjkey?: boolean | string;
+      message?: string;
+      chSubjtMessage?: string;
+      param?: { CONTENT_SEQ?: string };
+    };
+
+    if (submissionResult.isError) {
+      throw new Error(submissionResult.message || '과제 제출에 실패했습니다.');
+    }
+    if (!submissionResult.isKjkey || submissionResult.isKjkey === 'false') {
+      throw new Error(submissionResult.chSubjtMessage || '과제 제출 후 강의실 접근 상태를 확인할 수 없습니다.');
+    }
+
+    const contentSeq = submissionResult.param?.CONTENT_SEQ || CONTENT_SEQ;
+    if (contentSeq) {
+      await this.client.getHtml(
+        `${BASE_URL}/ilos/st/course/report_view_form.acl?CONTENT_SEQ=${contentSeq}&RT_SEQ=${RT_SEQ}&display=&start=&SCH_KEY=&SCH_VALUE=`,
+      );
+    }
 
     return SubmissionResultSchema.parse({
-      success,
-      message,
-      submittedFiles,
-      submittedAt,
+      success: true,
+      message: submissionResult.message || (mode === 'update' ? '성공적으로 수정되었습니다.' : '과제가 성공적으로 제출되었습니다.'),
+      submittedFiles: [...uploadedFiles],
+      submittedAt: new Date().toISOString(),
     });
   }
 
@@ -370,42 +569,132 @@ export class AssignmentService {
   private async embedImageInEditor(imagePath: string): Promise<void> {
     const page = this.client.getPage();
 
-    // 1. 이미지 삽입 버튼 클릭
-    const imageBtn = page.locator('#JR_TXT_image');
-    await imageBtn.click();
-    await page.waitForSelector('#mce_inlinepopups_', { state: 'visible', timeout: 5000 });
+    await page.waitForSelector('#JR_TXT_ifr', { state: 'attached', timeout: 10000 }).catch(() => {});
+    await page.locator('#JR_TXT_image').waitFor({ state: 'visible', timeout: 10000 });
 
-    // 2. "찾아보기" 버튼 클릭 → 파일 업로드 팝업 열기
-    // image.htm iframe 내부에 있음
+    await this.dismissDraftDialogs();
+
+    const imageBtn = page.locator('#JR_TXT_image');
+    await imageBtn.click({ force: true });
+    await page.waitForSelector('div[id^="mce_inlinepopups_"]', { state: 'visible', timeout: 5000 });
+
     const imageDialogIframe = page.frameLocator('iframe[id^="mce_inlinepopups_"][id$="_ifr"]');
-    const browseBtn = imageDialogIframe.locator('#src_browser, input[id^="src"][value*="찾아보기"], a[onclick*="myFileBrowser"]');
-    await browseBtn.click();
+    const browseBtn = imageDialogIframe.locator('#srcbrowser_link, #srcbrowser, a[href^="javascript:openBrowser"], a#srcbrowser_link');
+    await browseBtn.first().click({ force: true });
     await page.waitForSelector('iframe[src*="file_upload_pop_form"]', { state: 'attached', timeout: 5000 });
 
-    // 3. 파일 업로드 팝업에서 파일 선택 + 업로드
-    // file_upload_pop_form.acl 팝업이 새 인라인 팝업으로 열림
     const uploadPopupIframe = page.frameLocator('iframe[src*="file_upload_pop_form"]');
     const fileInput = uploadPopupIframe.locator('input[type="file"]');
     await fileInput.setInputFiles(imagePath);
 
-    // 업로드 버튼 클릭
     const uploadBtn = uploadPopupIframe.locator('input[type="submit"], button[type="submit"], #btn_upload, .btn_upload');
     if (await uploadBtn.count() > 0) {
       await uploadBtn.first().click();
-      // 업로드 완료 대기: 파일 목록 요소가 나타날 때까지 대기
       await uploadPopupIframe.locator('a[href*="/ilosfiles/editor-file/"], .file_list a, a[id^="file_"]').first().waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
     }
 
-    // 4. 업로드 완료 후 파일 목록에서 업로드된 파일 클릭 (URL 선택)
     const uploadedFileLink = uploadPopupIframe.locator('a[href*="/ilosfiles/editor-file/"], .file_list a, a[id^="file_"]').first();
     if (await uploadedFileLink.count() > 0) {
       await uploadedFileLink.click();
-      // iframe 간 통신 대기: src 필드가 채워질 때까지
-      await imageDialogIframe.locator('#src').waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+      await page.waitForFunction(() => {
+        const frames = Array.from(document.querySelectorAll('iframe[id^="mce_inlinepopups_"][id$="_ifr"]')) as HTMLIFrameElement[];
+        return frames.some((frame) => {
+          try {
+            const input = frame.contentDocument?.querySelector('#src') as HTMLInputElement | null;
+            return Boolean(input?.value);
+          } catch {
+            return false;
+          }
+        });
+      }, undefined, { timeout: 10000 }).catch(() => {});
     }
 
-    // 5. image.htm 다이얼로그로 돌아와서 "삽입" 버튼 클릭
+    const rawSrc = await imageDialogIframe.locator('#src').inputValue().catch(() => '');
+    const normalizedSrc = normalizeEditorImageSrc(rawSrc);
+    const imageId = extractEditorImageId(normalizedSrc);
+
     const insertBtn = imageDialogIframe.locator('#insert');
-    await insertBtn.click();
+    await insertBtn.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(500);
+
+    const normalized = await page.evaluate(({ src, id }) => {
+      const win = window as any;
+      const editor = win.tinymce?.get?.('JR_TXT');
+      const body = editor?.getBody?.();
+      if (!body) return false;
+
+      const images = Array.from(body.querySelectorAll('img')) as HTMLImageElement[];
+      const target = images.find((img) => {
+        const currentSrc = img.getAttribute('src') || '';
+        return currentSrc === src || currentSrc.endsWith(src);
+      });
+
+      if (!(target instanceof HTMLImageElement)) {
+        return false;
+      }
+
+      target.setAttribute('src', src);
+      target.setAttribute('class', 'imaxsoftUfiles');
+      if (!target.id) {
+        target.id = id;
+      }
+      win.tinymce?.triggerSave?.();
+      return true;
+    }, { src: normalizedSrc, id: imageId });
+
+    if (!normalized && normalizedSrc && imageId) {
+      await page.evaluate(({ src, id }) => {
+        const win = window as any;
+        const editor = win.tinymce?.get?.('JR_TXT');
+        if (!editor) return;
+        const current = editor.getContent({ format: 'html' }) || '';
+        if (current.includes(src)) return;
+        editor.setContent(`${current}\n<p><img class="imaxsoftUfiles" id="${id}" alt="" src="${src}" /></p>`);
+        win.tinymce?.triggerSave?.();
+      }, { src: normalizedSrc, id: imageId });
+    }
+  }
+
+  private async dismissDraftDialogs(): Promise<void> {
+    const page = this.client.getPage();
+
+    for (let i = 0; i < 6; i++) {
+      const handled = await page.evaluate(() => {
+        const isVisible = (el: Element | null): el is HTMLElement => {
+          if (!(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+
+        const buttons = Array.from(document.querySelectorAll('button, .ui-button'));
+        const findButton = (label: string) => {
+          return buttons.find((el) => isVisible(el) && (el.textContent || '').replace(/\s+/g, '').includes(label));
+        };
+
+        const deleteDraftBtn = findButton('아니오(삭제)');
+        if (deleteDraftBtn instanceof HTMLElement) {
+          deleteDraftBtn.click();
+          return true;
+        }
+
+        const visibleDialogs = Array.from(document.querySelectorAll('.ui-dialog, .ui-dialog-form'))
+          .filter(isVisible)
+          .map((el) => (el.textContent || '').replace(/\s+/g, ''));
+
+        if (visibleDialogs.some((text) => text.includes('삭제하시겠습니까'))) {
+          const yesBtn = findButton('네');
+          if (yesBtn instanceof HTMLElement) {
+            yesBtn.click();
+            return true;
+          }
+        }
+
+        return false;
+      });
+
+      if (!handled) break;
+      await page.waitForTimeout(500);
+    }
   }
 }
