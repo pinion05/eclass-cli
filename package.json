@@ -1,6 +1,6 @@
 {
   "name": "eclass-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI-first 한국공학대학교 e-Class client",
   "license": "MIT",
   "type": "module",
