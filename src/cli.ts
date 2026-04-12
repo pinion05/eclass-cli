@@ -9,7 +9,7 @@ const program = new Command();
 program
   .name('eclass')
   .description('CLI-first ilos 기반 e-Class LMS client')
-  .version('0.1.0');
+  .version('0.1.1');
 
 async function main() {
   const ctx = await createAppContext();
