@@ -17,8 +17,23 @@ function escapeHtmlAttribute(value: string): string {
   return value
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message || error.name;
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
 /** "2026.04.08 오후 11:59" 형식의 한국어 날짜 문자열을 Date 객체로 파싱 */
@@ -50,6 +65,10 @@ export function combineSeqCsv(...values: Array<string | null | undefined>): stri
     .filter(Boolean);
 
   return Array.from(new Set(merged)).join(',');
+}
+
+export function basenameFromPath(filePath: string): string {
+  return filePath.split(/[\\/]/).pop() || filePath;
 }
 
 export function normalizeEditorImageSrc(src: string): string {
@@ -98,6 +117,20 @@ export function buildEditorImageHtml(image: UploadedEditorImage): string {
   const id = escapeHtmlAttribute(image.id);
   const src = escapeHtmlAttribute(normalizeEditorImageSrc(image.src));
   return `<p><img class="imaxsoftUfiles" id="${id}" alt="" src="${src}" /></p>`;
+}
+
+export function extractEditorSeqsFromHtml(html: string): string {
+  const $ = cheerio.load(html);
+  const ids: string[] = [];
+
+  $('.imaxsoftUfiles').each((_, el) => {
+    const id = ($(el).attr('id') ?? '').trim();
+    if (id) {
+      ids.push(id);
+    }
+  });
+
+  return Array.from(new Set(ids)).join(',');
 }
 
 export function extractContentSeqFromUpdateScript(scriptSource: string): string | null {
@@ -488,14 +521,14 @@ export class AssignmentService {
         if (uploadResult.seq1) {
           uploadedFileSeqs.push(uploadResult.seq1);
         }
-        uploadedFiles.push(filePath.split('/').pop() || filePath);
+        uploadedFiles.push(basenameFromPath(filePath));
       }
     }
 
     if (options.images && options.images.length > 0) {
       for (const img of options.images) {
         await this.embedImageInEditor(img);
-        uploadedFiles.push(`[이미지] ${img.split('/').pop() || img}`);
+        uploadedFiles.push(`[이미지] ${basenameFromPath(img)}`);
       }
     }
 
@@ -524,6 +557,11 @@ export class AssignmentService {
         delFileSeqs: typeof win.getDelFileSeqs === 'function' ? win.getDelFileSeqs() : '',
       };
     });
+
+    const editorSeqs = combineSeqCsv(
+      submitPayload.editorSeqs,
+      extractEditorSeqsFromHtml(submitPayload.jrTxt),
+    );
 
     const submissionResult = await page.evaluate(
       async (params) => {
@@ -565,7 +603,7 @@ export class AssignmentService {
         contentSeq: CONTENT_SEQ,
         jrTxt: submitPayload.jrTxt,
         fileSeqs: combineSeqCsv(submitPayload.existingFileSeqs, uploadedFileSeqs.join(',')),
-        editorSeqs: submitPayload.editorSeqs,
+        editorSeqs,
         delFileSeqs: submitPayload.delFileSeqs,
       },
     ) as {
@@ -614,9 +652,18 @@ export class AssignmentService {
 
     try {
       await this.embedImageViaToolbar(imagePath);
-    } catch {
+    } catch (toolbarError) {
       this.editorImageEmbeddingMode = 'direct-upload';
-      await this.embedImageByDirectUpload(imagePath);
+      try {
+        await this.embedImageByDirectUpload(imagePath);
+      } catch (directUploadError) {
+        const fallbackError = new Error(
+          `TinyMCE 이미지 툴바 삽입 실패 후 직접 업로드 fallback도 실패했습니다. toolbar: ${formatUnknownError(toolbarError)}; direct-upload: ${formatUnknownError(directUploadError)}`,
+        ) as Error & { causes?: unknown[]; cause?: unknown };
+        fallbackError.cause = toolbarError;
+        fallbackError.causes = [toolbarError, directUploadError];
+        throw fallbackError;
+      }
     }
   }
 
@@ -639,16 +686,18 @@ export class AssignmentService {
         timeout: 15000,
       });
 
-      const uploadResponse = uploadPage.waitForResponse(
-        (response) => response.url().includes('/ilos/tinymce/file_upload_pop.acl')
-          && response.request().method() === 'POST',
-        { timeout: 30000 },
-      );
-
       await uploadPage.locator('input[type="file"]').setInputFiles(imagePath);
-      await uploadPage.locator('#insert').click({ force: true });
+      const uploadBtn = uploadPage.locator('input[type="submit"], button[type="submit"], #btn_upload, .btn_upload');
+      const [response] = await Promise.all([
+        uploadPage.waitForResponse(
+          (candidate) => candidate.url().includes('/ilos/tinymce/file_upload_pop.acl')
+            && candidate.request().method() === 'POST',
+          { timeout: 30000 },
+        ),
+        uploadBtn.first().click({ force: true }),
+      ]);
 
-      return parseEditorImageUploadResponse(await (await uploadResponse).text());
+      return parseEditorImageUploadResponse(await response.text());
     } finally {
       await uploadPage.close().catch(() => {});
     }
@@ -662,7 +711,16 @@ export class AssignmentService {
       if (editor) {
         const current = editor.getContent({ format: 'html' }) || '';
         if (!current.includes(src)) {
-          editor.setContent(`${current}\n${markup}`);
+          if (typeof editor.insertContent === 'function') {
+            const body = editor.getBody?.();
+            if (body) {
+              editor.selection?.select?.(body, true);
+              editor.selection?.collapse?.(false);
+            }
+            editor.insertContent(`\n${markup}`);
+          } else {
+            editor.setContent(`${current}\n${markup}`);
+          }
         }
         win.tinymce?.triggerSave?.();
         return;
@@ -722,7 +780,7 @@ export class AssignmentService {
     }
 
     const rawSrc = await imageDialogIframe.locator('#src').inputValue().catch(() => '');
-    const toolbarImage = createUploadedEditorImage(rawSrc, imagePath.split('/').pop() || imagePath);
+    const toolbarImage = createUploadedEditorImage(rawSrc, basenameFromPath(imagePath));
 
     const insertBtn = imageDialogIframe.locator('#insert');
     await insertBtn.click({ force: true }).catch(() => {});
