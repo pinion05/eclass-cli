@@ -7,6 +7,35 @@ import { CourseService } from './course-service.js';
 
 const BASE_URL = 'https://eclass.tukorea.ac.kr';
 
+export interface UploadedEditorImage {
+  originalName: string;
+  src: string;
+  id: string;
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message || error.name;
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 /** "2026.04.08 오후 11:59" 형식의 한국어 날짜 문자열을 Date 객체로 파싱 */
 function parseKoreanDate(dateStr: string): Date {
   let normalized = dateStr
@@ -38,6 +67,10 @@ export function combineSeqCsv(...values: Array<string | null | undefined>): stri
   return Array.from(new Set(merged)).join(',');
 }
 
+export function basenameFromPath(filePath: string): string {
+  return filePath.split(/[\\/]/).pop() || filePath;
+}
+
 export function normalizeEditorImageSrc(src: string): string {
   const trimmed = src.trim();
   if (!trimmed) return '';
@@ -58,6 +91,46 @@ export function extractEditorImageId(src: string): string {
   const normalized = normalizeEditorImageSrc(src);
   const basename = normalized.split('/').pop() ?? '';
   return basename.replace(/\.[^.]+$/, '');
+}
+
+export function createUploadedEditorImage(srcValue: string, originalName = ''): UploadedEditorImage {
+  const src = normalizeEditorImageSrc(srcValue);
+  const id = extractEditorImageId(src);
+
+  if (!src || !id) {
+    throw new Error('TinyMCE 이미지 업로드 응답의 이미지 경로를 파싱하지 못했습니다.');
+  }
+
+  return { originalName, src, id };
+}
+
+export function parseEditorImageUploadResponse(responseText: string): UploadedEditorImage {
+  const match = responseText.match(/parent\.addFile\(\s*(["'])(.*?)\1\s*,\s*(["'])(.*?)\3\s*\)/);
+  if (!match) {
+    throw new Error('TinyMCE 이미지 업로드 응답에서 addFile 호출을 찾지 못했습니다.');
+  }
+
+  return createUploadedEditorImage(match[4], match[2]);
+}
+
+export function buildEditorImageHtml(image: UploadedEditorImage): string {
+  const id = escapeHtmlAttribute(image.id);
+  const src = escapeHtmlAttribute(normalizeEditorImageSrc(image.src));
+  return `<p><img class="imaxsoftUfiles" id="${id}" alt="" src="${src}" /></p>`;
+}
+
+export function extractEditorSeqsFromHtml(html: string): string {
+  const $ = cheerio.load(html);
+  const ids: string[] = [];
+
+  $('.imaxsoftUfiles').each((_, el) => {
+    const id = ($(el).attr('id') ?? '').trim();
+    if (id) {
+      ids.push(id);
+    }
+  });
+
+  return Array.from(new Set(ids)).join(',');
 }
 
 export function extractContentSeqFromUpdateScript(scriptSource: string): string | null {
@@ -130,6 +203,8 @@ export function mergeAssignmentsBySeq(primary: Assignment[], fallback: Assignmen
 }
 
 export class AssignmentService {
+  private editorImageEmbeddingMode: 'legacy-toolbar' | 'direct-upload' = 'legacy-toolbar';
+
   constructor(
     private client: BrowserClient,
     private config: EclassConfig,
@@ -446,14 +521,14 @@ export class AssignmentService {
         if (uploadResult.seq1) {
           uploadedFileSeqs.push(uploadResult.seq1);
         }
-        uploadedFiles.push(filePath.split('/').pop() || filePath);
+        uploadedFiles.push(basenameFromPath(filePath));
       }
     }
 
     if (options.images && options.images.length > 0) {
       for (const img of options.images) {
         await this.embedImageInEditor(img);
-        uploadedFiles.push(`[이미지] ${img.split('/').pop() || img}`);
+        uploadedFiles.push(`[이미지] ${basenameFromPath(img)}`);
       }
     }
 
@@ -482,6 +557,11 @@ export class AssignmentService {
         delFileSeqs: typeof win.getDelFileSeqs === 'function' ? win.getDelFileSeqs() : '',
       };
     });
+
+    const editorSeqs = combineSeqCsv(
+      submitPayload.editorSeqs,
+      extractEditorSeqsFromHtml(submitPayload.jrTxt),
+    );
 
     const submissionResult = await page.evaluate(
       async (params) => {
@@ -523,7 +603,7 @@ export class AssignmentService {
         contentSeq: CONTENT_SEQ,
         jrTxt: submitPayload.jrTxt,
         fileSeqs: combineSeqCsv(submitPayload.existingFileSeqs, uploadedFileSeqs.join(',')),
-        editorSeqs: submitPayload.editorSeqs,
+        editorSeqs,
         delFileSeqs: submitPayload.delFileSeqs,
       },
     ) as {
@@ -559,14 +639,104 @@ export class AssignmentService {
   /**
    * TinyMCE 에디터에 이미지를 인라인 임베딩
    *
-   * 흐름:
-   * 1. 에디터 툴바에서 "이미지 삽입/편집" 버튼 클릭 (id=JR_TXT_image)
-   * 2. 인라인 팝업(image.htm)에서 "찾아보기" 버튼 클릭 → myFileBrowser()
-   * 3. 파일 업로드 팝업(file_upload_pop_form.acl?type=image)에서 파일 업로드
-   * 4. 업로드된 이미지 URL이 src 필드에 채워짐
-   * 5. "삽입" 버튼 클릭 → <img> 태그가 에디터 본문에 삽입
+   * 기본 흐름은 기존 TinyMCE 툴바/팝업을 사용한다.
+   * headless 환경에서 iframe 셀렉터나 src 반영 검증이 실패하면,
+   * 제출 폼 페이지는 유지한 채 별도 페이지로 이미지 업로드 폼을 열어
+   * parent.addFile(...) 응답을 파싱하고 JR_TXT 본문에 img 태그를 직접 추가한다.
    */
   private async embedImageInEditor(imagePath: string): Promise<void> {
+    if (this.editorImageEmbeddingMode === 'direct-upload') {
+      await this.embedImageByDirectUpload(imagePath);
+      return;
+    }
+
+    try {
+      await this.embedImageViaToolbar(imagePath);
+    } catch (toolbarError) {
+      this.editorImageEmbeddingMode = 'direct-upload';
+      try {
+        await this.embedImageByDirectUpload(imagePath);
+      } catch (directUploadError) {
+        const fallbackError = new Error(
+          `TinyMCE 이미지 툴바 삽입 실패 후 직접 업로드 fallback도 실패했습니다. toolbar: ${formatUnknownError(toolbarError)}; direct-upload: ${formatUnknownError(directUploadError)}`,
+        ) as Error & { causes?: unknown[]; cause?: unknown };
+        fallbackError.cause = toolbarError;
+        fallbackError.causes = [toolbarError, directUploadError];
+        throw fallbackError;
+      }
+    }
+  }
+
+  private async embedImageByDirectUpload(imagePath: string): Promise<void> {
+    const uploaded = await this.uploadEditorImageDirect(imagePath);
+    await this.appendUploadedEditorImage(uploaded);
+  }
+
+  private async uploadEditorImageDirect(imagePath: string): Promise<UploadedEditorImage> {
+    const page = this.client.getPage();
+    const uploadPage = await page.context().newPage();
+    uploadPage.on('pageerror', () => {
+      // The standalone TinyMCE upload form expects a parent popup context.
+      // We only need the POST response, so parent-window script errors are harmless.
+    });
+
+    try {
+      await uploadPage.goto(`${BASE_URL}/ilos/tinymce/file_upload_pop_form.acl?type=image`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 15000,
+      });
+
+      await uploadPage.locator('input[type="file"]').setInputFiles(imagePath);
+      const uploadBtn = uploadPage.locator('input[type="submit"], button[type="submit"], #btn_upload, .btn_upload');
+      const [response] = await Promise.all([
+        uploadPage.waitForResponse(
+          (candidate) => candidate.url().includes('/ilos/tinymce/file_upload_pop.acl')
+            && candidate.request().method() === 'POST',
+          { timeout: 30000 },
+        ),
+        uploadBtn.first().click({ force: true }),
+      ]);
+
+      return parseEditorImageUploadResponse(await response.text());
+    } finally {
+      await uploadPage.close().catch(() => {});
+    }
+  }
+
+  private async appendUploadedEditorImage(uploaded: UploadedEditorImage): Promise<void> {
+    const page = this.client.getPage();
+    await page.evaluate(({ markup, src }) => {
+      const win = window as any;
+      const editor = win.tinymce?.get?.('JR_TXT');
+      if (editor) {
+        const current = editor.getContent({ format: 'html' }) || '';
+        if (!current.includes(src)) {
+          if (typeof editor.insertContent === 'function') {
+            const body = editor.getBody?.();
+            if (body) {
+              editor.selection?.select?.(body, true);
+              editor.selection?.collapse?.(false);
+            }
+            editor.insertContent(`\n${markup}`);
+          } else {
+            editor.setContent(`${current}\n${markup}`);
+          }
+        }
+        win.tinymce?.triggerSave?.();
+        return;
+      }
+
+      const textarea = document.querySelector('#JR_TXT') as HTMLTextAreaElement | null;
+      if (!textarea) {
+        throw new Error('JR_TXT 에디터를 찾지 못했습니다.');
+      }
+      if (!textarea.value.includes(src)) {
+        textarea.value = `${textarea.value}\n${markup}`;
+      }
+    }, { markup: buildEditorImageHtml(uploaded), src: uploaded.src });
+  }
+
+  private async embedImageViaToolbar(imagePath: string): Promise<void> {
     const page = this.client.getPage();
 
     await page.waitForSelector('#JR_TXT_ifr', { state: 'attached', timeout: 10000 }).catch(() => {});
@@ -610,8 +780,7 @@ export class AssignmentService {
     }
 
     const rawSrc = await imageDialogIframe.locator('#src').inputValue().catch(() => '');
-    const normalizedSrc = normalizeEditorImageSrc(rawSrc);
-    const imageId = extractEditorImageId(normalizedSrc);
+    const toolbarImage = createUploadedEditorImage(rawSrc, basenameFromPath(imagePath));
 
     const insertBtn = imageDialogIframe.locator('#insert');
     await insertBtn.click({ force: true }).catch(() => {});
@@ -640,19 +809,27 @@ export class AssignmentService {
       }
       win.tinymce?.triggerSave?.();
       return true;
-    }, { src: normalizedSrc, id: imageId });
+    }, { src: toolbarImage.src, id: toolbarImage.id });
 
-    if (!normalized && normalizedSrc && imageId) {
-      await page.evaluate(({ src, id }) => {
-        const win = window as any;
-        const editor = win.tinymce?.get?.('JR_TXT');
-        if (!editor) return;
-        const current = editor.getContent({ format: 'html' }) || '';
-        if (current.includes(src)) return;
-        editor.setContent(`${current}\n<p><img class="imaxsoftUfiles" id="${id}" alt="" src="${src}" /></p>`);
-        win.tinymce?.triggerSave?.();
-      }, { src: normalizedSrc, id: imageId });
+    if (!normalized) {
+      await this.appendUploadedEditorImage(toolbarImage);
     }
+
+    if (!(await this.editorContentIncludesImage(toolbarImage.src))) {
+      throw new Error('TinyMCE 툴바 이미지 삽입 결과를 에디터 본문에서 확인하지 못했습니다.');
+    }
+  }
+
+  private async editorContentIncludesImage(src: string): Promise<boolean> {
+    const page = this.client.getPage();
+    return page.evaluate((expectedSrc) => {
+      const win = window as any;
+      const editor = win.tinymce?.get?.('JR_TXT');
+      const content = editor?.getContent?.({ format: 'html' })
+        ?? (document.querySelector('#JR_TXT') as HTMLTextAreaElement | null)?.value
+        ?? '';
+      return content.includes(expectedSrc);
+    }, src);
   }
 
   private async dismissDraftDialogs(): Promise<void> {
