@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildEditorImageHtml,
   combineSeqCsv,
+  createUploadedEditorImage,
   extractContentSeqFromUpdateScript,
   extractEditorImageId,
   mergeAssignmentsBySeq,
   normalizeEditorImageSrc,
+  parseEditorImageUploadResponse,
   parseReportAssignmentsFromListHtml,
 } from '../src/domain/services/assignment-service.js';
 
@@ -31,6 +34,42 @@ describe('assignment-service helpers', () => {
   it('extractContentSeqFromUpdateScript finds CONTENT_SEQ in updateGo payloads', () => {
     const script = `function updateGo(){ $.ajax({ data: { RT_SEQ : "6444455", CONTENT_SEQ : "6472277", FILE_SEQS : getFileSeqs() } }); }`;
     expect(extractContentSeqFromUpdateScript(script)).toBe('6472277');
+  });
+
+  it('parseEditorImageUploadResponse extracts direct TinyMCE upload metadata', () => {
+    const response = `<script>
+      parent.addFile("img_2ebe0b2474f8.jpg","/ilosfiles/editor-file/795851CD34725953C832/2026/ISUWM2DYSPLUG.jpg");
+    </script>`;
+
+    expect(parseEditorImageUploadResponse(response)).toEqual({
+      originalName: 'img_2ebe0b2474f8.jpg',
+      src: '/ilosfiles/editor-file/795851CD34725953C832/2026/ISUWM2DYSPLUG.jpg',
+      id: 'ISUWM2DYSPLUG',
+    });
+  });
+
+  it('parseEditorImageUploadResponse normalizes absolute upload URLs', () => {
+    const response = `parent.addFile('foo.png','https://eclass.tukorea.ac.kr/ilosfiles/editor-file/KJ/2026/ABC123.png');`;
+
+    expect(parseEditorImageUploadResponse(response)).toEqual({
+      originalName: 'foo.png',
+      src: '/ilosfiles/editor-file/KJ/2026/ABC123.png',
+      id: 'ABC123',
+    });
+  });
+
+  it('buildEditorImageHtml creates e-Class inline image markup', () => {
+    expect(
+      buildEditorImageHtml({
+        originalName: 'foo.png',
+        src: '/ilosfiles/editor-file/KJ/2026/ABC123.png',
+        id: 'ABC123',
+      }),
+    ).toBe('<p><img class="imaxsoftUfiles" id="ABC123" alt="" src="/ilosfiles/editor-file/KJ/2026/ABC123.png" /></p>');
+  });
+
+  it('createUploadedEditorImage rejects missing uploaded src', () => {
+    expect(() => createUploadedEditorImage('', 'foo.png')).toThrow('이미지 경로');
   });
 
   it('parseReportAssignmentsFromListHtml parses submitted rows from course report list html', () => {
